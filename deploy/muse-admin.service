@@ -1,0 +1,24 @@
+[Unit]
+Description=Muse recharge admin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=museadmin
+Group=museadmin
+WorkingDirectory=/opt/muse-admin
+ExecStart=/usr/bin/node --import tsx src/server.ts
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=240
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/muse-admin/data
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

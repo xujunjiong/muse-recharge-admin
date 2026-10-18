@@ -1,0 +1,12 @@
+node_modules/
+data/
+.env
+*.session
+*.session-*
+*.pem
+*.key
+.superpowers/
+public/app.js
+public/app.css
+
+.test-*
