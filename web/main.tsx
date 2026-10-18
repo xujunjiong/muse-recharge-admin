@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { TelegramConnection } from "./TelegramConnection.js";
 type Row = {
   row: number;
   code: string;
@@ -61,7 +62,7 @@ function App() {
     [csrf, setCsrf] = useState(""),
     [password, setPassword] = useState(""),
     [state, setState] = useState<any>(null),
-    [tab, setTab] = useState<"import" | "orders">("import"),
+    [tab, setTab] = useState<"import" | "orders" | "telegram">("import"),
     [rows, setRows] = useState<Row[]>([]),
     [importId, setImportId] = useState(""),
     [fileName, setFileName] = useState(""),
@@ -267,6 +268,13 @@ function App() {
             <Icon name="clock" />
             订单记录<span>{orders.length}</span>
           </button>
+          <button
+            className={tab === "telegram" ? "active" : ""}
+            onClick={() => setTab("telegram")}
+          >
+            <Icon name="check" />
+            Telegram 连接
+          </button>
         </nav>
         <div className="sidebar-note">
           <span className="green-dot" />
@@ -297,7 +305,13 @@ function App() {
         <header className="topbar">
           <div className="breadcrumb">
             工作空间 <span>/</span>{" "}
-            <strong>{tab === "import" ? "账户与导入" : "订单记录"}</strong>
+            <strong>
+              {tab === "import"
+                ? "账户与导入"
+                : tab === "telegram"
+                  ? "Telegram 连接"
+                  : "订单记录"}
+            </strong>
           </div>
           <div className={"mode " + (state?.mode === "mock" ? "mock" : "live")}>
             <span className="status-dot" />
@@ -311,12 +325,16 @@ function App() {
               <h1>
                 {tab === "import"
                   ? "把重复操作，交给队列。"
-                  : "每一笔交付，都有记录。"}
+                  : tab === "telegram"
+                    ? "在页面上，连接你的账号。"
+                    : "每一笔交付，都有记录。"}
               </h1>
               <p className="muted">
                 {tab === "import"
                   ? "导入账户，设好预算。剩下的，有序完成。"
-                  : "查看充值进度、实际扣款与机器人最终回执。"}
+                  : tab === "telegram"
+                    ? "首次配置一次，之后用手机号和验证码登录。"
+                    : "查看充值进度、实际扣款与机器人最终回执。"}
               </p>
             </div>
             <a className="button secondary" href="/api/export">
@@ -464,7 +482,14 @@ function App() {
                 ))}
             </div>
           )}
-          {tab === "import" ? (
+          {tab === "telegram" ? (
+            <TelegramConnection
+              value={state?.telegramLogin || null}
+              mode={state?.mode || "mock"}
+              api={api}
+              refresh={refresh}
+            />
+          ) : tab === "import" ? (
             <>
               <section
                 className="upload-card"

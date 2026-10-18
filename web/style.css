@@ -1140,3 +1140,61 @@ pre {
     padding: 28px;
   }
 }
+.connection-body {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 45px;
+  padding: 15px 26px 32px;
+}
+.connection-form {
+  max-width: 470px;
+}
+.connection-form form {
+  display: grid;
+  gap: 17px;
+}
+.connection-form > .text-button {
+  margin-top: 18px;
+}
+.login-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  color: #a0aa99;
+  font-size: 10px;
+  padding: 5px 0 23px;
+}
+.login-steps .current {
+  color: #3c6748;
+  font-weight: 700;
+}
+.credentials-box {
+  padding: 18px;
+  border: 1px solid #e0e8d7;
+  border-radius: 8px;
+  background: #f6f9f1;
+  display: grid;
+  gap: 14px;
+}
+.connection-help {
+  padding: 20px;
+  background: #f5f8ef;
+  border-radius: 10px;
+  align-self: start;
+}
+.connection-help h3 {
+  margin: 0 0 16px;
+}
+.connection-help p {
+  font-size: 11px;
+  color: #849477;
+  line-height: 1.9;
+  margin-top: 14px;
+}
+@media (max-width: 800px) {
+  .connection-body {
+    grid-template-columns: 1fr;
+    gap: 25px;
+    padding: 15px 20px 25px;
+  }
+}

@@ -41,6 +41,7 @@ export type Receipt = {
 };
 export interface BotAdapter {
   mode: "mock" | "telegram";
+  ready?: boolean;
   balance(): Promise<number>;
   prepare(order: InputOrder): Promise<Quote>;
   submit(quote: Quote, canSubmit?: () => boolean): Promise<void>;

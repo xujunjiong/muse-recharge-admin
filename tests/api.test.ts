@@ -205,3 +205,141 @@ test("parallel slow-body login requests cannot bypass attempt reservation", asyn
     await f.close();
   }
 });
+test("Telegram web login endpoints require admin session and CSRF without exposing credentials", async () => {
+  const { TelegramLogin } = await import("../src/telegram-login.js");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(process.cwd(), ".test-login-api-"));
+  const store = new Store(":memory:"),
+    adapter = new MockAdapter(),
+    worker = new Worker(store, adapter);
+  const loginFlow = new TelegramLogin(
+    join(dir, "auth.json"),
+    async () => ({
+      sendCode: async () => ({ viaApp: true }),
+      signIn: async () => ({ id: "123", name: "Test" }),
+      password: async () => ({ id: "123", name: "Test" }),
+      session: () => "session-secret",
+      close: async () => {},
+    }),
+    () => false,
+  );
+  const app = createApp({
+    store,
+    adapter,
+    worker,
+    passwordHash: hashPassword("testing-password"),
+    telegramLogin: loginFlow,
+  });
+  await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(app.address() as any).port}`;
+  try {
+    assert.equal((await fetch(base + "/api/telegram/status")).status, 401);
+    const { cookie, csrf } = await login(base);
+    const body = JSON.stringify({
+      phone: "+6581234567",
+      apiId: 12345,
+      apiHash: "0123456789abcdef0123456789abcdef",
+    });
+    assert.equal(
+      (
+        await fetch(base + "/api/telegram/start", {
+          method: "POST",
+          headers: { cookie, Origin: base, "Content-Type": "application/json" },
+          body,
+        })
+      ).status,
+      403,
+    );
+    const started = await fetch(base + "/api/telegram/start", {
+      method: "POST",
+      headers: {
+        cookie,
+        Origin: base,
+        "x-csrf-token": csrf,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+    assert.equal(started.status, 200);
+    const view = await started.text();
+    assert.ok(!view.includes("0123456789abcdef"));
+    assert.match(view, /code/);
+  } finally {
+    await loginFlow.close();
+    await new Promise<void>((r) => app.close(() => r()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test("batch request waiting for body must recheck concurrent Telegram login before creation", async () => {
+  const f = await fixture();
+  try {
+    const { cookie, csrf } = await login(f.base);
+    f.store.settings("wallet", {
+      balance: 200000,
+      at: new Date().toISOString(),
+    });
+    const importId = f.store.saveImport([
+      {
+        row: 2,
+        code: "AB12CD",
+        quantity: 1,
+        maxCost: 1700,
+        note: "",
+        errors: [],
+      },
+    ]);
+    const { request } = await import("node:http");
+    // Use a second server around the same test store, with a controlled login-status view.
+    let pending = false;
+    const fake: any = {
+      status: () => ({
+        phase: pending ? "code" : "idle",
+        busy: pending,
+        configured: true,
+      }),
+    };
+    const app = createApp({
+      store: f.store,
+      adapter: f.adapter,
+      worker: f.worker,
+      passwordHash: hashPassword("testing-password"),
+      telegramLogin: fake,
+    });
+    await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(app.address() as any).port}`;
+    let req: any;
+    const response = new Promise<number>((resolve, reject) => {
+      req = request(
+        base + "/api/batches",
+        {
+          method: "POST",
+          headers: {
+            cookie,
+            Origin: base,
+            "x-csrf-token": csrf,
+            "Content-Type": "application/json",
+          },
+        },
+        (r) => {
+          r.resume();
+          r.on("end", () => resolve(r.statusCode!));
+        },
+      );
+      req.on("error", reject);
+      req.flushHeaders();
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    pending = true;
+    req.end(
+      JSON.stringify({ key: "slow-batch", importId, rows: [2], budget: 1700 }),
+    );
+    const status = await response;
+    await new Promise<void>((r) => app.close(() => r()));
+    assert.equal(status, 400);
+    assert.equal(f.store.orders().length, 0);
+  } finally {
+    await f.close();
+  }
+});

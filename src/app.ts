@@ -15,6 +15,7 @@ import { Store } from "./store.js";
 import { Worker } from "./worker.js";
 import { parseWorkbook, templateWorkbook } from "./importer.js";
 import { parseReceipt } from "./receipts.js";
+import type { TelegramLogin } from "./telegram-login.js";
 import type { BotAdapter, Candidate } from "./types.js";
 export function hashPassword(password: string) {
   if (password.length < 12) throw Error("管理员密码至少 12 位");
@@ -55,8 +56,10 @@ export function createApp(config: {
   publicDir?: string;
   origin?: string;
   secureCookie?: boolean;
+  telegramLogin?: TelegramLogin;
 }) {
   const { store, worker, adapter } = config;
+  const runtimeReady = () => adapter.ready !== false;
   const publicDir = config.publicDir || resolve("public");
   const limits = new Map<string, { count: number; until: number }>();
   let botBusy = false;
@@ -154,6 +157,50 @@ export function createApp(config: {
           json(403, { error: "安全令牌不匹配，请刷新页面" });
           return;
         }
+        if (path.startsWith("/api/telegram/")) {
+          const flow = config.telegramLogin;
+          if (!flow) {
+            json(503, { error: "当前服务未启用 Telegram 网页登录" });
+            return;
+          }
+          if (path === "/api/telegram/status" && !post) {
+            json(200, {
+              ...flow.status(),
+              runtimeConnected: adapter.ready === true,
+            });
+            return;
+          }
+          if (!post) {
+            json(405, { error: "方法不允许" });
+            return;
+          }
+          const safeOrigin = new URL(origin);
+          if (
+            safeOrigin.protocol !== "https:" &&
+            !["127.0.0.1", "localhost", "[::1]"].includes(safeOrigin.hostname)
+          )
+            throw Error("Telegram 登录仅支持 HTTPS 或本机 SSH 隧道访问");
+          const d = JSON.parse((await body(req, 4096)).toString());
+          let result;
+          if (path === "/api/telegram/start")
+            result = await flow.start({
+              phone: String(d.phone || ""),
+              apiId: Number(d.apiId),
+              apiHash: String(d.apiHash || ""),
+            });
+          else if (path === "/api/telegram/code")
+            result = await flow.code(String(d.code || ""));
+          else if (path === "/api/telegram/password")
+            result = await flow.password(String(d.password || ""));
+          else if (path === "/api/telegram/cancel")
+            result = await flow.cancel();
+          else {
+            json(404, { error: "接口不存在" });
+            return;
+          }
+          json(200, { ...result, runtimeConnected: adapter.ready === true });
+          return;
+        }
         if (path === "/api/session" && !post) {
           json(200, { csrf: session.csrf });
           return;
@@ -176,11 +223,29 @@ export function createApp(config: {
             wallet: store.settings("wallet"),
             orders: store.orders(),
             batches: store.batches(),
-            connected: adapter.mode === "mock" ? "模拟模式" : "会话已连接",
+            connected:
+              adapter.mode === "mock"
+                ? "模拟模式"
+                : !runtimeReady()
+                  ? "等待 Telegram 登录"
+                  : "会话已连接",
+            telegramLogin: config.telegramLogin
+              ? {
+                  ...config.telegramLogin.status(),
+                  runtimeConnected: adapter.ready === true,
+                }
+              : null,
           });
           return;
         }
         if (path === "/api/refresh-balance" && post) {
+          const loginStatus = config.telegramLogin?.status();
+          if (
+            loginStatus &&
+            (loginStatus.busy ||
+              ["code", "password"].includes(loginStatus.phase))
+          )
+            throw Error("请先完成或取消 Telegram 登录");
           if (
             worker.busy ||
             botBusy ||
@@ -230,6 +295,15 @@ export function createApp(config: {
           return;
         }
         if (path === "/api/batches" && post) {
+          if (!runtimeReady())
+            throw Error("请先在 Telegram 连接页完成登录并刷新余额");
+          const loginStatus = config.telegramLogin?.status();
+          if (
+            loginStatus &&
+            (loginStatus.busy ||
+              ["code", "password"].includes(loginStatus.phase))
+          )
+            throw Error("正在更改 Telegram 登录，请完成或取消后再创建批次");
           const data = JSON.parse((await body(req, 128 * 1024)).toString());
           if (
             !Array.isArray(data.rows) ||
@@ -265,6 +339,14 @@ export function createApp(config: {
             )
               throw Error("余额未知或不足，请刷新余额或减少订单");
           }
+          const latestLogin = config.telegramLogin?.status();
+          if (
+            !runtimeReady() ||
+            (latestLogin &&
+              (latestLogin.busy ||
+                ["code", "password"].includes(latestLogin.phase)))
+          )
+            throw Error("Telegram 登录状态已变化，请稍后重新提交批次");
           const b = store.createBatch(
             data.key,
             rows,

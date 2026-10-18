@@ -23,7 +23,13 @@ export class Worker {
     if (this.heartbeat) clearInterval(this.heartbeat);
   }
   async tick() {
-    if (this.busy || this.maintenance || !this.store.ownsWorker()) return;
+    if (
+      this.busy ||
+      this.maintenance ||
+      this.adapter.ready === false ||
+      !this.store.ownsWorker()
+    )
+      return;
     this.busy = true;
     try {
       const o = this.store.claim();

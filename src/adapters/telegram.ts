@@ -34,12 +34,15 @@ export class TelegramAdapter implements BotAdapter {
     apiId: number;
     apiHash: string;
     sessionFile: string;
+    session?: string;
     expectedBotId: string;
   }) {
     const { TelegramClient } = await import("telegram");
     const { StringSession } = await import("telegram/sessions/index.js");
     const client = new TelegramClient(
-      new StringSession(readFileSync(config.sessionFile, "utf8").trim()),
+      new StringSession(
+        config.session ?? readFileSync(config.sessionFile, "utf8").trim(),
+      ),
       config.apiId,
       config.apiHash,
       TELEGRAM_OPTIONS,
@@ -67,13 +70,11 @@ export class TelegramAdapter implements BotAdapter {
           out.push({
             id: m.id,
             text: m.message,
-            buttons: (bb || [])
-              .flat()
-              .map((b) => ({
-                text: b.text,
-                callback: !!b.data,
-                click: () => b.click({}),
-              })),
+            buttons: (bb || []).flat().map((b) => ({
+              text: b.text,
+              callback: !!b.data,
+              click: () => b.click({}),
+            })),
           });
         }
         return out.sort((a, b) => a.id - b.id);
