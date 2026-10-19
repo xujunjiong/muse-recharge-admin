@@ -18,6 +18,7 @@ import { parseReceipt } from "./receipts.js";
 import type { TelegramLogin } from "./telegram-login.js";
 import type { BotAdapter, Candidate, InputOrder } from "./types.js";
 import { PACKAGE_PRICES } from "./pricing.js";
+import { resolveBatchRow } from "./batch-settings.js";
 export function hashPassword(password: string) {
   if (password.length < 12) throw Error("管理员密码至少 12 位");
   const salt = randomBytes(16).toString("hex");
@@ -340,10 +341,13 @@ export function createApp(config: {
             rows = data.rows.map((n: unknown) => {
               const r = candidates.find((r) => r.row === n);
               if (!r || r.errors.length) throw Error("包含无效导入行");
+              const effective = resolveBatchRow(r, data.quantity, data.maxCost);
+              if (effective.errors.length)
+                throw Error(effective.errors.join("；"));
               return {
                 code: r.code,
-                quantity: data.quantity ?? r.quantity,
-                maxCost: data.maxCost ?? r.maxCost,
+                quantity: effective.quantity!,
+                maxCost: effective.maxCost!,
                 note: r.note,
               };
             });

@@ -459,3 +459,112 @@ test("single recharge rejects malformed codes and unsupported quantities without
     await f.close();
   }
 });
+
+test("batch quantity can use spreadsheet rows or a uniform override with matching cost totals", async () => {
+  const f = await fixture();
+  try {
+    const { cookie, csrf } = await login(f.base);
+    f.store.settings("wallet", { balance: 200000 });
+    const importId = f.store.saveImport([
+      {
+        row: 2,
+        code: "AB12CD",
+        quantity: 1,
+        maxCost: null,
+        note: "",
+        errors: [],
+      },
+      {
+        row: 3,
+        code: "EF34GH",
+        quantity: 20,
+        maxCost: 28000,
+        note: "",
+        errors: [],
+      },
+      {
+        row: 4,
+        code: "IJ56KL",
+        quantity: 30,
+        maxCost: null,
+        note: "",
+        errors: [],
+      },
+      {
+        row: 5,
+        code: "MN78OP",
+        quantity: null,
+        maxCost: null,
+        note: "",
+        errors: [],
+      },
+    ]);
+    // Existing table quantities must also be overridden, not just blank rows.
+    const existing = f.store.getImport(importId) as any[];
+    existing.push({
+      row: 6,
+      code: "QR90ST",
+      quantity: 10,
+      maxCost: null,
+      note: "",
+      errors: [],
+    });
+    const overrideImportId = f.store.saveImport(existing);
+    const submit = (data: object) =>
+      fetch(f.base + "/api/batches", {
+        method: "POST",
+        headers: {
+          cookie,
+          Origin: f.base,
+          "x-csrf-token": csrf,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ importId, ...data }),
+      });
+    const first = await submit({
+      key: "table-quantity",
+      rows: [2, 3, 4],
+      quantity: null,
+      maxCost: null,
+      budget: 79700,
+    });
+    assert.equal(first.status, 200);
+    const orders = f.store
+      .orders()
+      .sort((a, b) => a.code.localeCompare(b.code));
+    assert.deepEqual(
+      orders.map((o) => [o.quantity, o.maxCost]),
+      [
+        [1, 1700],
+        [20, 28000],
+        [30, 50000],
+      ],
+    );
+    const missing = await submit({
+      key: "missing-quantity",
+      rows: [5],
+      quantity: null,
+      budget: 50000,
+    });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /第 5 行.*充值量/);
+    const uniform = await submit({
+      key: "uniform-quantity",
+      importId: overrideImportId,
+      rows: [5, 6],
+      quantity: 5,
+      maxCost: null,
+      budget: 15000,
+    });
+    assert.equal(uniform.status, 200);
+    const order = f.store.orders().find((o) => o.code === "MN78OP")!;
+    assert.equal(order.quantity, 5);
+    assert.equal(order.maxCost, 7500);
+    assert.equal(
+      f.store.orders().find((o) => o.code === "QR90ST")!.quantity,
+      5,
+    );
+  } finally {
+    await f.close();
+  }
+});

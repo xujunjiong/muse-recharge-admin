@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 import { TelegramConnection } from "./TelegramConnection.js";
 import { SingleRecharge } from "./SingleRecharge.js";
+import { resolveBatchRow } from "../src/batch-settings.js";
 import { PACKAGE_PRICES as prices } from "../src/pricing.js";
 type Row = {
   row: number;
@@ -61,8 +62,8 @@ function App() {
     [importId, setImportId] = useState(""),
     [fileName, setFileName] = useState(""),
     [selected, setSelected] = useState<Set<number>>(new Set()),
-    [quantity, setQuantity] = useState(1),
-    [maxCost, setMaxCost] = useState(1700),
+    [quantity, setQuantity] = useState<number | null>(null),
+    [maxCost, setMaxCost] = useState<number | null>(null),
     [budget, setBudget] = useState(0),
     [preview, setPreview] = useState(false),
     [allowRepeat, setAllowRepeat] = useState(false),
@@ -160,7 +161,16 @@ function App() {
   }
   const valid = rows.filter((r) => !r.errors.length),
     chosen = rows.filter((r) => selected.has(r.row) && !r.errors.length),
-    total = chosen.length * maxCost;
+    effectiveRows = chosen.map((r) => ({
+      ...r,
+      ...resolveBatchRow(r, quantity, maxCost),
+    })),
+    settingsErrors = effectiveRows.flatMap((r) => r.errors),
+    totalQuantity = effectiveRows.reduce(
+      (sum, r) => sum + (r.quantity || 0),
+      0,
+    ),
+    total = effectiveRows.reduce((sum, r) => sum + (r.maxCost || 0), 0);
   function toggle(n: number) {
     setSelected((old) => {
       const next = new Set(old);
@@ -172,6 +182,10 @@ function App() {
     setError("");
     if (!chosen.length) {
       setError("请先选择有效账户");
+      return;
+    }
+    if (settingsErrors.length) {
+      setError(settingsErrors.join("；"));
       return;
     }
     setBudget(total);
@@ -553,13 +567,15 @@ function App() {
                   <label>
                     统一充值量
                     <select
-                      value={quantity}
+                      value={quantity ?? ""}
                       onChange={(e) => {
-                        const q = Number(e.target.value);
+                        const q =
+                          e.target.value === "" ? null : Number(e.target.value);
                         setQuantity(q);
-                        setMaxCost(prices[q]);
+                        setMaxCost(q === null ? null : prices[q]);
                       }}
                     >
+                      <option value="">无（使用表格）</option>
                       {Object.keys(prices).map((q) => (
                         <option value={q} key={q}>
                           {q}B token
@@ -568,17 +584,22 @@ function App() {
                     </select>
                   </label>
                   <label>
-                    单笔扣款上限（IDR）
+                    统一单笔扣款上限（IDR，可空）
                     <input
                       type="number"
                       min="1"
                       step="1"
-                      value={maxCost}
-                      onChange={(e) => setMaxCost(Number(e.target.value))}
+                      value={maxCost ?? ""}
+                      placeholder="按表格，缺失时按档位"
+                      onChange={(e) =>
+                        setMaxCost(
+                          e.target.value === "" ? null : Number(e.target.value),
+                        )
+                      }
                     />
                   </label>
                   <span className="tools-note">
-                    以上设置将应用到本次选中账户，覆盖表格内的充值量与上限。
+                    统一充值量选“无”时使用表格；选择数量时覆盖表格。费用上限留空时优先用表格，缺失时按最终充值档位自动匹配。
                   </span>
                 </div>
                 <div className="table-scroll">
@@ -604,8 +625,8 @@ function App() {
                         </th>
                         <th>来源行</th>
                         <th>Muse 邀请码</th>
-                        <th>表格充值量</th>
-                        <th>表格费用上限</th>
+                        <th>实际充值量</th>
+                        <th>实际费用上限</th>
                         <th>校验结果</th>
                         <th>备注</th>
                       </tr>
@@ -624,53 +645,63 @@ function App() {
                           </td>
                         </tr>
                       ) : (
-                        rows.map((r) => (
-                          <tr
-                            key={r.row}
-                            className={
-                              selected.has(r.row) ? "selected-row" : ""
-                            }
-                          >
-                            <td>
-                              <input
-                                aria-label={`选择第 ${r.row} 行`}
-                                type="checkbox"
-                                disabled={!!r.errors.length}
-                                checked={selected.has(r.row)}
-                                onChange={() => toggle(r.row)}
-                              />
-                            </td>
-                            <td className="muted">
-                              {String(r.row).padStart(2, "0")}
-                            </td>
-                            <td>
-                              <code>{r.code || "—"}</code>
-                            </td>
-                            <td>
-                              {r.quantity ? r.quantity + "B" : "使用统一设置"}
-                            </td>
-                            <td>
-                              {r.maxCost
-                                ? "Rp " + money(r.maxCost)
-                                : "使用统一设置"}
-                            </td>
-                            <td>
-                              <span
-                                className={
-                                  "badge " +
-                                  (r.errors.length
-                                    ? "needs_review"
-                                    : "succeeded")
-                                }
-                              >
-                                {r.errors.length
-                                  ? r.errors.join("；")
-                                  : "校验通过"}
-                              </span>
-                            </td>
-                            <td className="note-cell">{r.note || "—"}</td>
-                          </tr>
-                        ))
+                        rows.map((r) => {
+                          const effective = resolveBatchRow(
+                            r,
+                            quantity,
+                            maxCost,
+                          );
+                          const errors = [...r.errors, ...effective.errors];
+                          return (
+                            <tr
+                              key={r.row}
+                              className={
+                                selected.has(r.row) ? "selected-row" : ""
+                              }
+                            >
+                              <td>
+                                <input
+                                  aria-label={`选择第 ${r.row} 行`}
+                                  type="checkbox"
+                                  disabled={!!r.errors.length}
+                                  checked={selected.has(r.row)}
+                                  onChange={() => toggle(r.row)}
+                                />
+                              </td>
+                              <td className="muted">
+                                {String(r.row).padStart(2, "0")}
+                              </td>
+                              <td>
+                                <code>{r.code || "—"}</code>
+                              </td>
+                              <td>
+                                {effective.quantity
+                                  ? effective.quantity + "B"
+                                  : "未填写"}
+                              </td>
+                              <td>
+                                {effective.maxCost
+                                  ? "Rp " + money(effective.maxCost)
+                                  : "待补充"}
+                              </td>
+                              <td>
+                                <span
+                                  className={
+                                    "badge " +
+                                    (errors.length
+                                      ? "needs_review"
+                                      : "succeeded")
+                                  }
+                                >
+                                  {errors.length
+                                    ? errors.join("；")
+                                    : "校验通过"}
+                                </span>
+                              </td>
+                              <td className="note-cell">{r.note || "—"}</td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -679,18 +710,15 @@ function App() {
                   <span>
                     已选 <strong>{chosen.length}</strong> 个账户{" "}
                     <span className="sep">|</span> 总量{" "}
-                    <strong>{chosen.length * quantity}B</strong>
+                    <strong>
+                      {settingsErrors.length ? "待补充" : totalQuantity + "B"}
+                    </strong>
                     <span className="sep">|</span> 费用上限{" "}
                     <strong>Rp {money(total)}</strong>
                   </span>
                   <button
                     className="primary"
-                    disabled={
-                      busy ||
-                      !chosen.length ||
-                      !Number.isSafeInteger(maxCost) ||
-                      maxCost <= 0
-                    }
+                    disabled={busy || !chosen.length}
                     onClick={openPreview}
                   >
                     批量下单 <Icon name="arrow" />
@@ -847,11 +875,13 @@ function App() {
               </div>
               <div>
                 <small>总充值量</small>
-                <strong>{chosen.length * quantity}B</strong>
+                <strong>
+                  {settingsErrors.length ? "待补充" : totalQuantity + "B"}
+                </strong>
               </div>
               <div>
-                <small>单笔上限</small>
-                <strong>Rp {money(maxCost)}</strong>
+                <small>费用上限合计</small>
+                <strong>Rp {money(total)}</strong>
               </div>
             </div>
             <label>
@@ -868,8 +898,10 @@ function App() {
               必须至少为 Rp {money(total)}。逐笔核对实际报价，超出限制会暂停。
             </p>
             <div className="code-preview">
-              {chosen.slice(0, 12).map((r) => (
-                <code key={r.row}>{r.code}</code>
+              {effectiveRows.slice(0, 12).map((r) => (
+                <code key={r.row}>
+                  {r.code} · {r.quantity}B · Rp {money(r.maxCost)}
+                </code>
               ))}
               {chosen.length > 12 && <span>另 {chosen.length - 12} 个</span>}
             </div>
@@ -892,7 +924,10 @@ function App() {
               <button
                 className="primary"
                 disabled={
-                  busy || budget < total || !Number.isSafeInteger(budget)
+                  busy ||
+                  settingsErrors.length > 0 ||
+                  budget < total ||
+                  !Number.isSafeInteger(budget)
                 }
                 onClick={() =>
                   void action(async () => {
