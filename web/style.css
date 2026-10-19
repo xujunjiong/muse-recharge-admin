@@ -1231,3 +1231,41 @@ pre {
     padding: 0 16px 16px;
   }
 }
+
+.batch-panel {
+  margin-bottom: 24px;
+}
+.batch-heading {
+  font-size: 14px;
+  margin: 0 0 12px;
+}
+.batch-description {
+  display: grid;
+  gap: 5px;
+}
+.batch-description strong {
+  color: #a65b2e;
+}
+.batch-history summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #526d45;
+  padding: 12px 0;
+}
+.batch-history time {
+  margin-left: auto;
+}
+.batch-empty {
+  font-size: 12px;
+}
+.batch-history .batch-strip {
+  background: #fafbf8;
+}
+@media (max-width: 700px) {
+  .batch-panel .batch-strip > div {
+    flex-wrap: wrap;
+  }
+  .batch-history time {
+    margin-left: 0;
+  }
+}

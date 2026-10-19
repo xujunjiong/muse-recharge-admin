@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import {
   QUANTITIES,
   positiveInt,
+  type Batch,
   type InputOrder,
   type Order,
   type Quote,
@@ -115,12 +116,47 @@ export class Store {
     if (!r) throw Error("导入记录不存在");
     return JSON.parse(r.rows);
   }
-  batches() {
+  batches(): Batch[] {
+    const statuses = [
+      "succeeded",
+      "failed",
+      "cancelled",
+      "partial",
+      "needs_review",
+      "queued",
+      "preparing",
+      "payment_submitting",
+      "processing",
+    ];
+    const countsSql = statuses
+      .map(
+        (status) =>
+          `COUNT(o.id) FILTER (WHERE o.status='${status}') AS ${status}`,
+      )
+      .join(",");
+    const blocked = this.resumeBlocked();
     return this.db
       .prepare(
-        "SELECT id,budget,paused,reason,createdAt FROM batches ORDER BY rowid DESC",
+        `
+      SELECT b.id,b.budget,b.paused,b.reason,b.createdAt,COUNT(o.id) AS total,${countsSql}
+      FROM batches b LEFT JOIN orders o ON o.batchId=b.id
+      GROUP BY b.id ORDER BY b.createdAt DESC,b.rowid DESC
+    `,
       )
-      .all();
+      .all()
+      .map((r: any) => ({
+        id: r.id,
+        budget: r.budget,
+        paused: r.paused,
+        reason: r.reason,
+        createdAt: r.createdAt,
+        finished:
+          r.total > 0 && r.succeeded + r.failed + r.cancelled === r.total,
+        canResume: !!r.paused && r.queued > 0 && !blocked,
+        counts: Object.fromEntries(
+          ["total", ...statuses].map((status) => [status, r[status]]),
+        ),
+      }));
   }
   orders(): Order[] {
     return this.db
@@ -271,15 +307,22 @@ export class Store {
       .prepare("UPDATE batches SET paused=1,reason=? WHERE id=?")
       .run(reason, id);
   }
+  private resumeBlocked() {
+    return !!this.db
+      .prepare(
+        "SELECT id FROM orders WHERE status IN ('needs_review','payment_submitting','processing')",
+      )
+      .get();
+  }
   resume(id: string) {
-    if (
-      this.db
-        .prepare(
-          "SELECT id FROM orders WHERE status IN ('needs_review','payment_submitting','processing')",
-        )
-        .get()
-    )
+    if (this.resumeBlocked())
       throw Error("存在需要核查或正在付款的订单，不能恢复");
+    if (
+      !this.db
+        .prepare("SELECT id FROM orders WHERE batchId=? AND status='queued'")
+        .get(id)
+    )
+      throw Error("该批次没有待执行订单，不能恢复");
     this.db.prepare("UPDATE batches SET paused=0,reason='' WHERE id=?").run(id);
   }
   cancel(id: string) {

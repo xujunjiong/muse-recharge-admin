@@ -51,3 +51,14 @@ export interface BotAdapter {
 export function positiveInt(n: unknown): n is number {
   return Number.isSafeInteger(n) && Number(n) > 0 && Number(n) <= 1_000_000_000;
 }
+
+export type Batch = {
+  id: string;
+  budget: number;
+  paused: number;
+  reason: string;
+  createdAt: string;
+  finished: boolean;
+  canResume: boolean;
+  counts: Record<string, number>;
+};

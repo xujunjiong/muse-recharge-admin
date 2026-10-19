@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 import { TelegramConnection } from "./TelegramConnection.js";
 import { SingleRecharge } from "./SingleRecharge.js";
+import { BatchList } from "./BatchList.js";
 import { resolveBatchRow } from "../src/batch-settings.js";
 import { PACKAGE_PRICES as prices } from "../src/pricing.js";
 type Row = {
@@ -438,58 +439,27 @@ function App() {
               </div>
             </section>
           </div>
-          {state?.batches?.some(
-            (b: any) =>
-              b.paused ||
-              orders.some(
-                (o: any) =>
-                  o.batchId === b.id &&
-                  [
-                    "queued",
-                    "preparing",
-                    "processing",
-                    "payment_submitting",
-                  ].includes(o.status),
-              ),
-          ) && (
-            <div className="batch-strip">
-              {state.batches
-                .filter(
-                  (b: any) =>
-                    b.paused ||
-                    orders.some(
-                      (o: any) =>
-                        o.batchId === b.id &&
-                        [
-                          "queued",
-                          "preparing",
-                          "processing",
-                          "payment_submitting",
-                        ].includes(o.status),
-                    ),
-                )
-                .map((b: any) => (
-                  <div key={b.id}>
-                    <span className="batch-tag">批次 {b.id.slice(0, 8)}</span>
-                    <span>{b.paused ? b.reason : "正在队列中执行"}</span>
-                    <button
-                      className="small-button"
-                      disabled={busy}
-                      onClick={() =>
-                        void action(() =>
-                          api(
-                            `batches/${b.id}/${b.paused ? "resume" : "pause"}`,
-                            {},
-                          ),
-                        )
-                      }
-                    >
-                      {b.paused ? "恢复执行" : "暂停后续"}
-                    </button>
-                  </div>
-                ))}
-            </div>
-          )}
+          <BatchList
+            batches={state?.batches || []}
+            busy={busy}
+            onAction={(id, command) =>
+              void action(() => api(`batches/${id}/${command}`, {}))
+            }
+            onReview={(id) =>
+              void action(async () => {
+                setTab("orders");
+                setFilter("needs_review");
+                setSearch("");
+                const order = orders.find(
+                  (o: any) => o.batchId === id && o.status === "needs_review",
+                );
+                if (order) {
+                  setDetail(await api(`orders/${order.id}`));
+                  setReviewText("");
+                }
+              })
+            }
+          />
           {tab === "telegram" ? (
             <TelegramConnection
               value={state?.telegramLogin || null}

@@ -568,3 +568,97 @@ test("batch quantity can use spreadsheet rows or a uniform override with matchin
     await f.close();
   }
 });
+
+test("state archives terminal batches regardless of pause and reports exact result counts", async () => {
+  const f = await fixture();
+  try {
+    const { cookie } = await login(f.base);
+    const b = f.store.createBatch(
+      "archive-mixed",
+      ["AB12CD", "EF34GH", "IJ56KL"].map((code) => ({
+        code,
+        quantity: 1,
+        maxCost: 1700,
+      })),
+      5100,
+    );
+    const orders = f.store.orders();
+    ["succeeded", "failed", "cancelled"].forEach((s, i) =>
+      f.store.setStatus(orders[i].id, s, "test"),
+    );
+    f.store.pause(b.id);
+    const state = await (
+      await fetch(f.base + "/api/state", { headers: { cookie } })
+    ).json();
+    const batch = state.batches.find((v: any) => v.id === b.id);
+    assert.equal(batch.finished, true);
+    assert.equal(batch.canResume, false);
+    assert.equal(batch.counts.succeeded, 1);
+    assert.equal(batch.counts.failed, 1);
+    assert.equal(batch.counts.cancelled, 1);
+    assert.equal(batch.counts.total, 3);
+    assert.throws(() => f.store.resume(b.id), /没有待执行订单/);
+    assert.equal(f.store.orders().length, 3);
+  } finally {
+    await f.close();
+  }
+});
+
+test("state keeps unfinished statuses visible and archives after review resolution", async () => {
+  const f = await fixture();
+  try {
+    const { cookie } = await login(f.base);
+    const statuses = [
+      "queued",
+      "preparing",
+      "payment_submitting",
+      "processing",
+      "needs_review",
+      "partial",
+      "future_status",
+    ];
+    statuses.forEach((status, i) => {
+      const b = f.store.createBatch(
+        "visible-" + status,
+        [
+          {
+            code: "A" + String(i).padStart(5, "0"),
+            quantity: 1,
+            maxCost: 1700,
+          },
+        ],
+        1700,
+      );
+      const order = f.store.orders().find((o) => o.batchId === b.id)!;
+      f.store.setStatus(order.id, status, "test");
+      f.store.pause(b.id);
+    });
+    let state = await (
+      await fetch(f.base + "/api/state", { headers: { cookie } })
+    ).json();
+    for (const b of state.batches) {
+      assert.equal(b.finished, false);
+      assert.equal(
+        b.canResume,
+        false,
+        "pending payment or review anywhere blocks resume",
+      );
+    }
+    const review = f.store.orders().find((o) => o.status === "needs_review")!;
+    f.store.resolve(review.id, "not_charged");
+    state = await (
+      await fetch(f.base + "/api/state", { headers: { cookie } })
+    ).json();
+    assert.equal(
+      state.batches.find((b: any) => b.id === review.batchId).finished,
+      true,
+    );
+    const partial = f.store.orders().find((o) => o.status === "partial")!;
+    assert.equal(
+      state.batches.find((b: any) => b.id === partial.batchId).finished,
+      false,
+    );
+  } finally {
+    await f.close();
+  }
+});
