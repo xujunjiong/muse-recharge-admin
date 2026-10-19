@@ -18,16 +18,27 @@ export const TELEGRAM_OPTIONS = {
   autoReconnect: true,
   floodSleepThreshold: 60,
 };
-type Ref = { id: number; text: string; maxId: number };
+type Ref = { id: number; text: string; maxId: number; startMaxId?: number };
 export function isFreshResult(m: Snapshot, r: Ref) {
   return m.id > r.maxId || (m.id === r.id && m.text !== r.text);
+}
+/** 去掉按钮文本开头的 emoji/装饰符号，保留真正的按钮文案 */
+export function stripButtonDecor(text: string) {
+  return text.replace(/^[^\p{L}\p{N}]+/u, "");
+}
+/** 配额按钮的精确模式：开头必须是 "<qty>B"，可选 "FULL"，后跟破折号 */
+export function quotaButtonPattern(qty: number) {
+  return new RegExp(`^${qty}B(?:\\s+FULL)?\\s*[—–-]`);
 }
 export class TelegramAdapter implements BotAdapter {
   mode = "telegram" as const;
   submitted = new Set<string>();
   constructor(
     public transport: Transport,
-    public timeout = 180000,
+    // 付款后等回执的超时：机器人交付是 30 次尝试逐次灌满，
+    // 维护或排队时可能很久；2026-10-19 起改为 15 分钟。
+    // 注意 wait() 内部仍按 45 秒封顶，只影响 result()。
+    public timeout = 900000,
     public poll = 1500,
   ) {}
   static async connect(config: {
@@ -127,6 +138,21 @@ export class TelegramAdapter implements BotAdapter {
     if (b.length !== 1) throw Error("机器人菜单不匹配或按钮不唯一，已停止");
     return b[0];
   }
+  /**
+   * 配额按钮匹配：真实菜单的按钮常带 emoji/装饰前缀
+   * （如 "🔥 30B FULL — Rp 40.500 / $2.26 (BEST VALUE)"），
+   * 先去掉装饰再匹配 "^<qty>B [FULL] —"。
+   * 注意不能用宽松的包含匹配："✏️ Custom Amount (1B - 30B)"
+   * 里也含有 "1B"/"30B"，必须锚定在开头。
+   */
+  quotaButton(m: Snapshot, qty: number) {
+    const re = quotaButtonPattern(qty);
+    const b = m.buttons.filter(
+      (b) => b.callback && re.test(stripButtonDecor(b.text)),
+    );
+    if (b.length !== 1) throw Error("机器人菜单不匹配或按钮不唯一，已停止");
+    return b[0];
+  }
   async entry() {
     return this.action(
       () => this.transport.send("/start"),
@@ -155,6 +181,12 @@ export class TelegramAdapter implements BotAdapter {
     return parseIdr(match[1]);
   }
   async prepare(order: InputOrder): Promise<Quote> {
+    // 记录本单开始时的最大消息 id：机器人有时回执来得极快
+    // （早于付款提交），result() 必须能看到这段时间内的回执。
+    const startMaxId = Math.max(
+      0,
+      ...(await this.transport.read()).map((x) => x.id),
+    );
     let m = await this.entry();
     if (/Welcome to Satu Digital/i.test(m.text))
       m = await this.action(
@@ -182,7 +214,7 @@ export class TelegramAdapter implements BotAdapter {
     );
     if (
       !m.buttons.some((b) =>
-        new RegExp(`^\\s*${order.quantity}B\\s*[—–-]`).test(b.text),
+        quotaButtonPattern(order.quantity).test(stripButtonDecor(b.text)),
       )
     )
       m = await this.action(
@@ -190,9 +222,8 @@ export class TelegramAdapter implements BotAdapter {
         (m) => /Choose a Quota Package/i.test(m.text),
         m.id,
       );
-    const re = new RegExp(`^\\s*${order.quantity}B(?:\\s+FULL)?\\s*[—–-]`);
     m = await this.action(
-      () => this.button(m, re).click(),
+      () => this.quotaButton(m, order.quantity).click(),
       (m) => m.text.includes("MUSEAI TOKEN DELIVERY CONFIRMATION"),
       m.id,
     );
@@ -215,6 +246,7 @@ export class TelegramAdapter implements BotAdapter {
         id: m.id,
         text: m.text,
         maxId: Math.max(...all.map((x) => x.id)),
+        startMaxId,
       }),
     };
   }
@@ -237,11 +269,28 @@ export class TelegramAdapter implements BotAdapter {
   }
   async result(q: Quote): Promise<Receipt> {
     const r: Ref = JSON.parse(q.ref!);
+    // 回执可能早于付款提交到达（如机器人即时交付），用本单开始时的
+    // startMaxId 而不是报价时的 maxId 做下界，避免漏掉早期回执。
+    // 仍要求回执的邀请码与本单一致（worker 侧会再次校验）。
+    const sinceId = r.startMaxId ?? r.maxId;
     const until = Date.now() + this.timeout;
+    let readFailures = 0;
     while (Date.now() < until) {
-      const messages = (await this.transport.read()).filter((m) =>
-        isFreshResult(m, r),
-      );
+      let messages: Snapshot[];
+      try {
+        messages = (await this.transport.read()).filter(
+          (m) => m.id > sinceId || (m.id === r.id && m.text !== r.text),
+        );
+      } catch (e) {
+        // 付款已提交，等回执期间的瞬时网络抖动不能直接判失败：
+        // 继续等到超时，超时才转人工核查。
+        readFailures++;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(15000, this.poll * readFailures)),
+        );
+        continue;
+      }
+      readFailures = 0;
       for (const m of messages.reverse()) {
         const receipt = parseReceipt(m.text);
         if (receipt) return receipt;
@@ -249,6 +298,16 @@ export class TelegramAdapter implements BotAdapter {
           /FAILED|INSUFFICIENT BALANCE|INVALID CODE|EXPIRED CODE/i.test(m.text)
         )
           throw Error("机器人报告异常，需核对是否扣款或退款");
+        // 机器人明确说系统维护、交付延迟：不会再有回执，直接转人工核查，
+        // 不必空等到超时。钱是否已扣、币是否会补发，都以 Telegram 为准。
+        if (
+          /temporarily delayed|periodic maintenance|under maintenance/i.test(
+            m.text,
+          )
+        )
+          throw Error(
+            "机器人系统维护中，交付延迟；请稍后在 Telegram 核对是否扣款/到账",
+          );
       }
       await new Promise((resolve) => setTimeout(resolve, this.poll));
     }

@@ -1,5 +1,35 @@
 import { Store } from "./store.js";
-import type { BotAdapter } from "./types.js";
+import type { BotAdapter, InputOrder, Quote } from "./types.js";
+
+/**
+ * 准备阶段（进菜单、填邀请码、选配额、读确认页）不触碰资金，
+ * 瞬时网络抖动可安全重试，不必每次都进人工核查、暂停整批。
+ * 注意：submit() 一旦开始就涉及资金，绝不自动重试。
+ */
+export function isTransientNetworkError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  return /unsuccessful|timed out|timeout|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed/i.test(
+    msg,
+  );
+}
+
+export async function prepareWithRetry(
+  adapter: BotAdapter,
+  order: InputOrder,
+  maxAttempts = 3,
+): Promise<Quote> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await adapter.prepare(order);
+    } catch (e) {
+      last = e;
+      if (!isTransientNetworkError(e) || attempt >= maxAttempts) throw e;
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  }
+  throw last;
+}
 export class Worker {
   busy = false;
   maintenance = false;
@@ -35,7 +65,7 @@ export class Worker {
       const o = this.store.claim();
       if (!o) return;
       try {
-        const q = await this.adapter.prepare(o);
+        const q = await prepareWithRetry(this.adapter, o);
         if (!this.store.beginPayment(o.id, q)) return;
         await this.adapter.submit(
           q,

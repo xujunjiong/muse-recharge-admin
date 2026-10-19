@@ -121,7 +121,7 @@ const app = createApp({
   secureCookie: process.env.COOKIE_SECURE === "true",
 });
 const port = Number(process.env.PORT || 3000);
-app.listen(port, "127.0.0.1", () => {
+app.listen(port, "0.0.0.0", () => {
   console.log(
     `Muse Admin: http://127.0.0.1:${port} (${mode === "mock" ? "模拟模式，不会真实扣款" : "真实充值模式"})`,
   );
