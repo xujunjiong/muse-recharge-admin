@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { TelegramConnection } from "./TelegramConnection.js";
+import { SingleRecharge } from "./SingleRecharge.js";
+import { PACKAGE_PRICES as prices } from "../src/pricing.js";
 type Row = {
   row: number;
   code: string;
@@ -20,14 +22,6 @@ const labels: Record<string, string> = {
   failed: "已结束",
   needs_review: "待核查",
   cancelled: "已取消",
-};
-const prices: Record<number, number> = {
-  1: 1700,
-  5: 7500,
-  10: 14000,
-  15: 21000,
-  20: 27000,
-  30: 39000,
 };
 const money = (n: unknown) =>
   typeof n === "number" ? new Intl.NumberFormat("en-US").format(n) : "—";
@@ -331,7 +325,7 @@ function App() {
               </h1>
               <p className="muted">
                 {tab === "import"
-                  ? "导入账户，设好预算。剩下的，有序完成。"
+                  ? "单笔直接填写邀请码，批量通过 Excel 导入。"
                   : tab === "telegram"
                     ? "首次配置一次，之后用手机号和验证码登录。"
                     : "查看充值进度、实际扣款与机器人最终回执。"}
@@ -491,6 +485,16 @@ function App() {
             />
           ) : tab === "import" ? (
             <>
+              <SingleRecharge
+                api={api}
+                mode={state?.mode || "mock"}
+                walletBalance={state?.wallet?.balance}
+                onCreated={async () => {
+                  setTab("orders");
+                  setNotice("单笔订单已创建，后台将按队列执行。");
+                  await refresh();
+                }}
+              />
               <section
                 className="upload-card"
                 onDragOver={(e) => e.preventDefault()}

@@ -343,3 +343,119 @@ test("batch request waiting for body must recheck concurrent Telegram login befo
     await f.close();
   }
 });
+
+test("single recharge needs no import, derives its budget and submits once on retries", async () => {
+  const f = await fixture();
+  try {
+    const { cookie, csrf } = await login(f.base);
+    const headers = {
+      cookie,
+      Origin: f.base,
+      "x-csrf-token": csrf,
+      "Content-Type": "application/json",
+    };
+    const submit = (data: unknown, h = headers) =>
+      fetch(f.base + "/api/single-orders", {
+        method: "POST",
+        headers: h,
+        body: JSON.stringify(data),
+      });
+    assert.equal(
+      (
+        await fetch(f.base + "/api/single-orders", {
+          method: "POST",
+          headers: { Origin: f.base },
+          body: "{}",
+        })
+      ).status,
+      401,
+    );
+    assert.equal(
+      (await submit({}, { ...headers, "x-csrf-token": "wrong" })).status,
+      403,
+    );
+    const payload = {
+      key: "single-once",
+      code: " ab12cd ",
+      quantity: 5,
+      budget: 1,
+      maxCost: 1,
+    };
+    assert.equal(
+      (await submit(payload)).status,
+      400,
+      "unknown balance blocks creation",
+    );
+    f.store.settings("wallet", { balance: 7499 });
+    assert.equal(
+      (await submit(payload)).status,
+      400,
+      "budget comes from supported package price",
+    );
+    f.store.settings("wallet", { balance: 200000 });
+    const first = await submit(payload);
+    assert.equal(first.status, 200);
+    const batch = await first.json();
+    assert.equal(batch.budget, 7500);
+    assert.equal(f.store.orders().length, 1);
+    assert.equal(f.store.orders()[0].code, "AB12CD");
+    assert.equal(f.store.orders()[0].quantity, 5);
+    assert.equal(f.store.orders()[0].maxCost, 7500);
+    assert.equal(f.adapter.submissions, 0, "creation only queues the order");
+    f.store.settings("wallet", { balance: null });
+    assert.equal((await (await submit(payload)).json()).id, batch.id);
+    assert.equal(f.store.orders().length, 1);
+    await f.worker.tick();
+    assert.equal(f.store.orders()[0].status, "succeeded");
+    assert.equal(f.adapter.submissions, 1);
+    f.store.settings("wallet", { balance: 200000 });
+    assert.equal((await submit({ ...payload, key: "repeat" })).status, 400);
+    assert.equal(
+      (await submit({ ...payload, key: "repeat", allowRepeat: true })).status,
+      200,
+    );
+    assert.equal(
+      (await submit({ ...payload, key: "repeat-pending", allowRepeat: true }))
+        .status,
+      400,
+    );
+    assert.equal(
+      (await submit({ ...payload, quantity: 1 })).status,
+      400,
+      "same key cannot change payload",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("single recharge rejects malformed codes and unsupported quantities without saving orders", async () => {
+  const f = await fixture();
+  try {
+    const { cookie, csrf } = await login(f.base);
+    f.store.settings("wallet", { balance: 200000 });
+    for (const data of [
+      { code: "", quantity: 1 },
+      { code: "AB12CDx", quantity: 1 },
+      { code: "AB12CD", quantity: 2 },
+      { code: "AB12CD", quantity: 1.5 },
+      { code: "AB12CD", quantity: "5" },
+      { code: 123456, quantity: 1 },
+    ]) {
+      const r = await fetch(f.base + "/api/single-orders", {
+        method: "POST",
+        headers: {
+          cookie,
+          Origin: f.base,
+          "x-csrf-token": csrf,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ key: "invalid-single", ...data }),
+      });
+      assert.equal(r.status, 400);
+    }
+    assert.equal(f.store.orders().length, 0);
+  } finally {
+    await f.close();
+  }
+});

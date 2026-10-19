@@ -1198,3 +1198,36 @@ pre {
     padding: 15px 20px 25px;
   }
 }
+
+.single-recharge {
+  margin-bottom: 24px;
+}
+.single-tools {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.single-estimate {
+  display: grid;
+  gap: 8px;
+  margin-right: auto;
+  padding-bottom: 10px;
+}
+.single-estimate small {
+  color: #788378;
+}
+.single-estimate strong {
+  font-size: 18px;
+}
+.single-hint {
+  padding: 0 24px 20px;
+  margin: 0;
+  font-size: 12px;
+}
+@media (max-width: 700px) {
+  .single-tools > button {
+    width: 100%;
+  }
+  .single-hint {
+    padding: 0 16px 16px;
+  }
+}

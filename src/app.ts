@@ -16,7 +16,8 @@ import { Worker } from "./worker.js";
 import { parseWorkbook, templateWorkbook } from "./importer.js";
 import { parseReceipt } from "./receipts.js";
 import type { TelegramLogin } from "./telegram-login.js";
-import type { BotAdapter, Candidate } from "./types.js";
+import type { BotAdapter, Candidate, InputOrder } from "./types.js";
+import { PACKAGE_PRICES } from "./pricing.js";
 export function hashPassword(password: string) {
   if (password.length < 12) throw Error("管理员密码至少 12 位");
   const salt = randomBytes(16).toString("hex");
@@ -294,7 +295,10 @@ export function createApp(config: {
           json(200, { id, rows });
           return;
         }
-        if (path === "/api/batches" && post) {
+        if (
+          (path === "/api/batches" || path === "/api/single-orders") &&
+          post
+        ) {
           if (!runtimeReady())
             throw Error("请先在 Telegram 连接页完成登录并刷新余额");
           const loginStatus = config.telegramLogin?.status();
@@ -305,22 +309,46 @@ export function createApp(config: {
           )
             throw Error("正在更改 Telegram 登录，请完成或取消后再创建批次");
           const data = JSON.parse((await body(req, 128 * 1024)).toString());
-          if (
-            !Array.isArray(data.rows) ||
-            new Set(data.rows).size !== data.rows.length
-          )
-            throw Error("选中行有误");
-          const candidates = store.getImport(data.importId) as Candidate[];
-          const rows = data.rows.map((n: unknown) => {
-            const r = candidates.find((r) => r.row === n);
-            if (!r || r.errors.length) throw Error("包含无效导入行");
-            return {
-              code: r.code,
-              quantity: data.quantity ?? r.quantity,
-              maxCost: data.maxCost ?? r.maxCost,
-              note: r.note,
-            };
-          });
+          let rows: InputOrder[];
+          let budget: number;
+          if (path === "/api/single-orders") {
+            if (
+              typeof data.code !== "string" ||
+              !/^[A-Z0-9]{6}$/i.test(data.code.trim())
+            )
+              throw Error("请输入六位字母或数字邀请码");
+            if (
+              typeof data.quantity !== "number" ||
+              !Object.hasOwn(PACKAGE_PRICES, data.quantity)
+            )
+              throw Error("充值量只支持 1、5、10、15、20、30B");
+            budget = PACKAGE_PRICES[data.quantity];
+            rows = [
+              {
+                code: data.code.trim().toUpperCase(),
+                quantity: data.quantity,
+                maxCost: budget,
+              },
+            ];
+          } else {
+            if (
+              !Array.isArray(data.rows) ||
+              new Set(data.rows).size !== data.rows.length
+            )
+              throw Error("选中行有误");
+            const candidates = store.getImport(data.importId) as Candidate[];
+            rows = data.rows.map((n: unknown) => {
+              const r = candidates.find((r) => r.row === n);
+              if (!r || r.errors.length) throw Error("包含无效导入行");
+              return {
+                code: r.code,
+                quantity: data.quantity ?? r.quantity,
+                maxCost: data.maxCost ?? r.maxCost,
+                note: r.note,
+              };
+            });
+            budget = Number(data.budget);
+          }
           if (
             !store.db
               .prepare("SELECT id FROM batches WHERE requestKey=?")
@@ -350,7 +378,7 @@ export function createApp(config: {
           const b = store.createBatch(
             data.key,
             rows,
-            Number(data.budget),
+            budget,
             data.allowRepeat === true,
           );
           json(200, b);
