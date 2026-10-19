@@ -26,6 +26,7 @@ export type Order = InputOrder & {
   receipt?: Receipt;
 };
 export type Quote = {
+  orderId?: string;
   code: string;
   quantity: number;
   cost: number;
@@ -33,6 +34,7 @@ export type Quote = {
   raw?: string;
 };
 export type Receipt = {
+  messageId?: number;
   code: string;
   quantity: number;
   cost: number;
@@ -46,6 +48,9 @@ export interface BotAdapter {
   prepare(order: InputOrder): Promise<Quote>;
   submit(quote: Quote, canSubmit?: () => boolean): Promise<void>;
   result(quote: Quote): Promise<Receipt>;
+  onReceipt?: (receipt: Receipt) => boolean;
+  receiptOwner?: (messageId: number) => string | undefined;
+  pollReceipts?(): Promise<void>;
   close?(): Promise<void>;
 }
 export function positiveInt(n: unknown): n is number {

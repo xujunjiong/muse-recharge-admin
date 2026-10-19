@@ -6,12 +6,13 @@ import type { BotAdapter, InputOrder, Quote } from "./types.js";
  * 瞬时网络抖动可安全重试，不必每次都进人工核查、暂停整批。
  * 注意：submit() 一旦开始就涉及资金，绝不自动重试。
  */
-export function isTransientNetworkError(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e ?? "");
-  return /unsuccessful|timed out|timeout|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed/i.test(
-    msg,
-  );
-}
+export { isTransientNetworkError } from "./execution-errors.js";
+import {
+  classifyFailure,
+  errorMessage,
+  isTransientNetworkError,
+} from "./execution-errors.js";
+import { receiptMatches } from "./receipt-matching.js";
 
 export async function prepareWithRetry(
   adapter: BotAdapter,
@@ -32,6 +33,7 @@ export async function prepareWithRetry(
 }
 export class Worker {
   busy = false;
+  private nextReceiptPoll = 0;
   maintenance = false;
   timer?: ReturnType<typeof setInterval>;
   heartbeat?: ReturnType<typeof setInterval>;
@@ -40,6 +42,10 @@ export class Worker {
     public adapter: BotAdapter,
   ) {
     if (!store.acquireWorker()) throw Error("已有执行器运行，不能重复启动");
+    adapter.onReceipt = (receipt) =>
+      store.ownsWorker() && store.observeReceipt(receipt);
+    adapter.receiptOwner = (id) =>
+      store.settings("receiptMessage:" + id)?.orderId;
   }
   start() {
     this.store.recover();
@@ -62,41 +68,56 @@ export class Worker {
       return;
     this.busy = true;
     try {
+      if (
+        this.adapter.pollReceipts &&
+        Date.now() >= this.nextReceiptPoll &&
+        this.store
+          .orders()
+          .some(
+            (o) =>
+              o.status === "needs_review" &&
+              this.store.settings("isolatedReview:" + o.id) === true,
+          )
+      ) {
+        this.nextReceiptPoll = Date.now() + 15000;
+        try {
+          await this.adapter.pollReceipts();
+        } catch (e) {
+          if (!isTransientNetworkError(e))
+            this.store.haltQueue(errorMessage(e));
+        }
+      }
       const o = this.store.claim();
       if (!o) return;
       try {
-        const q = await prepareWithRetry(this.adapter, o);
+        const q = {
+          ...(await prepareWithRetry(this.adapter, o)),
+          orderId: o.id,
+        };
         if (!this.store.beginPayment(o.id, q)) return;
-        await this.adapter.submit(
-          q,
-          () =>
-            this.store.ownsWorker() &&
-            this.store.order(o.id).status === "payment_submitting",
-        );
+        let submissionMessage = "已提交付款，等待机器人最终回执";
+        try {
+          await this.adapter.submit(
+            q,
+            () =>
+              this.store.ownsWorker() &&
+              !this.store.queueControl().stopped &&
+              this.store.order(o.id).status === "payment_submitting",
+          );
+        } catch (e) {
+          if (!isTransientNetworkError(e)) throw e;
+          submissionMessage = "付款提交时网络闪断，结果不明，等待回执确认";
+        }
         if (!this.store.ownsWorker()) return;
-        this.store.setStatus(
-          o.id,
-          "processing",
-          "已提交付款，等待机器人最终回执",
-        );
+        this.store.setStatus(o.id, "processing", submissionMessage);
         const r = await this.adapter.result(q);
         if (
           !this.store.ownsWorker() ||
           this.store.order(o.id).status !== "processing"
         )
           return;
-        if (
-          r.code !== o.code ||
-          !Number.isFinite(r.quantity) ||
-          r.quantity <= 0 ||
-          r.quantity > o.quantity ||
-          !Number.isSafeInteger(r.cost) ||
-          r.cost < 0 ||
-          r.cost > o.maxCost ||
-          (r.cost !== q.cost && r.quantity === o.quantity)
-        ) {
+        if (!receiptMatches(o, q, r))
           throw Error("机器人回执与订单或报价不匹配");
-        }
         this.store.transaction(() => {
           this.store.setStatus(
             o.id,
@@ -110,6 +131,11 @@ export class Worker {
             balance: r.balance,
             at: new Date().toISOString(),
           });
+          if (r.messageId)
+            this.store.settings("receiptMessage:" + r.messageId, {
+              orderId: o.id,
+            });
+          this.store.recordOutcome(o.batchId, r.quantity === o.quantity);
           if (r.quantity !== o.quantity)
             this.store.pause(o.batchId, "部分交付，请核对后继续");
         });
@@ -117,13 +143,29 @@ export class Worker {
         if (!this.store.ownsWorker()) return;
         const current = this.store.order(o.id);
         if (current.status === "cancelled") return;
+        const paymentStarted = ["payment_submitting", "processing"].includes(
+          current.status,
+        );
+        const kind = classifyFailure(e, paymentStarted);
         this.store.transaction(() => {
           this.store.setStatus(
             o.id,
-            "needs_review",
-            (e as Error).message.slice(0, 400),
+            paymentStarted ? "needs_review" : "failed",
+            errorMessage(e).slice(0, 400),
           );
-          this.store.pause(o.batchId, "异常或付款结果不明，需核查");
+          if (paymentStarted && kind === "uncertain")
+            this.store.isolateReview(o.id);
+          if (paymentStarted)
+            this.store.settings("wallet", {
+              balance: null,
+              at: new Date().toISOString(),
+              error: "付款结果待核查，后续付款仍核对机器人实时余额",
+            });
+          if (kind === "systemic")
+            this.store.haltQueue(
+              "系统性异常：" + errorMessage(e).slice(0, 300),
+            );
+          this.store.recordOutcome(o.batchId, false);
         });
       }
     } finally {

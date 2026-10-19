@@ -29,7 +29,7 @@ test("result reports maintenance delay clearly instead of timing out", async () 
     ref: JSON.stringify({
       id: 20,
       text: "confirm",
-      maxId: 25,
+      maxId: 21,
       startMaxId: 10,
     }),
   };

@@ -37,15 +37,16 @@ test("successful order is charged exactly once and persisted", async () => {
   assert.equal(a.submissions, 1);
   s.close();
 });
-test("unknown payment blocks the entire queue and cannot be resumed blindly", async () => {
+test("known receipt timeout isolates its target and permits the next distinct target", async () => {
   const { s, w, a } = setup();
   a.scenario = "timeout";
   const b = s.createBatch("k", [row, { ...row, code: "EF34GH" }], 3400);
   await w.tick();
   assert.equal(s.orders()[0].status, "needs_review");
   await w.tick();
-  assert.equal(a.submissions, 1);
-  assert.throws(() => s.resume(b.id), /核查/);
+  assert.equal(a.submissions, 2);
+  assert.equal(s.orders()[1].status, "needs_review");
+  assert.throws(() => s.createBatch("duplicate", [row], 1700), /未决/);
   s.close();
 });
 test("quote increase and target mismatch never submit payment", async () => {
@@ -55,7 +56,8 @@ test("quote increase and target mismatch never submit payment", async () => {
     s.createBatch("k", [row], 1700);
     await w.tick();
     assert.equal(a.submissions, 0);
-    assert.equal(s.orders()[0].status, "needs_review");
+    assert.equal(s.orders()[0].status, "failed");
+    assert.equal(s.queueControl().stopped, scenario === "wrongCode");
     s.close();
   }
 });

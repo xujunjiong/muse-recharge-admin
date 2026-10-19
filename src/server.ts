@@ -43,23 +43,25 @@ if (mode === "mock")
     balance: await adapter.balance(),
     at: new Date().toISOString(),
   });
-const telegramLogin = new TelegramLogin(
-  resolve(process.env.TELEGRAM_LOGIN_FILE || "data/telegram-login.json"),
-  createLoginTransport,
-  () =>
-    worker.busy ||
-    worker.maintenance ||
-    store
-      .orders()
-      .some((o) =>
+const loginBlocked = () =>
+  worker.busy ||
+  worker.maintenance ||
+  store
+    .orders()
+    .some(
+      (o) =>
         [
-          "queued",
           "preparing",
           "payment_submitting",
           "processing",
           "needs_review",
-        ].includes(o.status),
-      ),
+        ].includes(o.status) ||
+        (o.status === "queued" && !store.queueControl().stopped),
+    );
+const telegramLogin = new TelegramLogin(
+  resolve(process.env.TELEGRAM_LOGIN_FILE || "data/telegram-login.json"),
+  createLoginTransport,
+  loginBlocked,
   {
     apiId: Number(process.env.TELEGRAM_API_ID),
     apiHash: process.env.TELEGRAM_API_HASH || "",
@@ -78,22 +80,7 @@ const telegramLogin = new TelegramLogin(
     }
   },
   async (persist) => {
-    if (
-      worker.busy ||
-      worker.maintenance ||
-      store
-        .orders()
-        .some((o) =>
-          [
-            "queued",
-            "preparing",
-            "payment_submitting",
-            "processing",
-            "needs_review",
-          ].includes(o.status),
-        )
-    )
-      throw Error("有执行中任务，暂不能更换会话");
+    if (loginBlocked()) throw Error("有执行中任务，暂不能更换会话");
     worker.maintenance = true;
     try {
       await persist();
@@ -109,6 +96,8 @@ if (adapter instanceof ManagedTelegram) {
     await adapter.connect();
   } catch {
     store.settings("connectionError", "等待在管理页连接 Telegram");
+    if (store.orders().some((o) => o.status === "queued"))
+      store.haltQueue("Telegram 连接未完成，请在连接页登录或重连后恢复队列");
   }
 }
 const app = createApp({

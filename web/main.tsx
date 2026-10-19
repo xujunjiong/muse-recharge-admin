@@ -21,7 +21,7 @@ const labels: Record<string, string> = {
   processing: "交付中",
   succeeded: "交付成功",
   partial: "部分交付",
-  failed: "已结束",
+  failed: "失败",
   needs_review: "待核查",
   cancelled: "已取消",
 };
@@ -74,9 +74,13 @@ function App() {
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState("all"),
     [detail, setDetail] = useState<any>(null),
-    [reviewText, setReviewText] = useState("");
+    [reviewText, setReviewText] = useState(""),
+    [reviewMessageId, setReviewMessageId] = useState("");
   const input = useRef<HTMLInputElement>(null),
     requestKey = useRef("");
+  useEffect(() => {
+    setReviewMessageId("");
+  }, [detail]);
   async function api(path: string, body?: unknown, raw = false) {
     const res = await fetch("/api/" + path, {
       method: body === undefined ? "GET" : "POST",
@@ -197,7 +201,10 @@ function App() {
   const orders = state?.orders || [],
     visibleOrders = orders.filter(
       (o: any) =>
-        (filter === "all" || o.status === filter) &&
+        (filter === "all" ||
+          (filter === "exceptions"
+            ? ["failed", "needs_review", "partial"].includes(o.status)
+            : o.status === filter)) &&
         o.code.includes(search.trim().toUpperCase()),
     );
   const succeeded = orders.filter((o: any) => o.status === "succeeded").length,
@@ -439,6 +446,24 @@ function App() {
               </div>
             </section>
           </div>
+          {state?.queueControl?.stopped && (
+            <div className="alert error queue-stop" role="alert">
+              <div>
+                <strong>整个执行队列已暂停</strong>
+                <p>{state.queueControl.reason}</p>
+                <small>
+                  处理停止原因后可恢复，失败和待核查订单不会自动再次付款。
+                </small>
+              </div>
+              <button
+                className="secondary"
+                disabled={busy || state?.busy}
+                onClick={() => void action(() => api("queue/resume", {}))}
+              >
+                恢复队列
+              </button>
+            </div>
+          )}
           <BatchList
             batches={state?.batches || []}
             busy={busy}
@@ -703,7 +728,9 @@ function App() {
                   <h2>
                     全部订单 <span className="count">{orders.length}</span>
                   </h2>
-                  <p>处理中不会重复提交；结果不明时自动暂停。</p>
+                  <p>
+                    单条异常隔离后继续，付款不明不重试；系统异常或连续三单异常时停止队列。
+                  </p>
                 </div>
                 <div className="filters">
                   <input
@@ -718,6 +745,9 @@ function App() {
                     onChange={(e) => setFilter(e.target.value)}
                   >
                     <option value="all">所有状态</option>
+                    <option value="exceptions">
+                      异常订单（失败／待核查／部分交付）
+                    </option>
                     {Object.entries(labels).map(([k, v]) => (
                       <option key={k} value={k}>
                         {v}
@@ -961,7 +991,8 @@ function App() {
                 <pre>{detail.order.receipt.raw}</pre>
               </>
             )}
-            {detail.order.status === "needs_review" && (
+            {(detail.order.status === "needs_review" ||
+              detail.pendingReceipts?.length > 0) && (
               <div className="review">
                 <h3>核查结果</h3>
                 {error && (
@@ -972,6 +1003,32 @@ function App() {
                 <p className="fine">
                   先在 Telegram 核对，不能因超时直接认定未扣款。
                 </p>
+                {detail.pendingReceipts?.length > 0 && (
+                  <label>
+                    选择待核查的机器人回执
+                    <select
+                      value={reviewMessageId}
+                      onChange={(e) => {
+                        setReviewMessageId(e.target.value);
+                        const receipt = detail.pendingReceipts.find(
+                          (r: any) => r.messageId === Number(e.target.value),
+                        );
+                        if (receipt) setReviewText(receipt.raw);
+                      }}
+                    >
+                      <option value="">请选择（唯一匹配时可自动关联）</option>
+                      {detail.pendingReceipts.map((r: any) => (
+                        <option key={r.messageId} value={r.messageId}>
+                          回执 #{r.messageId} · {r.code} · {r.quantity}B · Rp{" "}
+                          {money(r.cost)}
+                        </option>
+                      ))}
+                    </select>
+                    <small>
+                      补录会保存回执归属；确认已人工处理后，该条回执不会再次触发暂停。
+                    </small>
+                  </label>
+                )}
                 <textarea
                   aria-label="补录机器人最终回执"
                   placeholder="如已交付，粘贴机器人完整的最终成功回执"
@@ -985,18 +1042,25 @@ function App() {
                     onClick={() => {
                       if (
                         window.confirm(
-                          "你是否已在机器人核实：没有扣款，或已全额退款？此操作不会重新付款。",
+                          detail.order.status === "needs_review"
+                            ? "你是否已在机器人核实：没有扣款，或已全额退款？所选回执会标记为已人工处理，此操作不会重新付款。"
+                            : "是否已核实所选回执与本单无关？确认后保留本单结果，并标记该回执已人工处理。",
                         )
                       )
                         void action(async () => {
                           await api(`orders/${detail.order.id}/resolve`, {
                             resolution: "not_charged",
+                            messageId: reviewMessageId
+                              ? Number(reviewMessageId)
+                              : undefined,
                           });
                           setDetail(null);
                         });
                     }}
                   >
-                    确认未扣款／已退款
+                    {detail.order.status === "needs_review"
+                      ? "确认未扣款／已退款"
+                      : "该回执与本单无关（已核查）"}
                   </button>
                   <button
                     className="primary"
@@ -1006,6 +1070,9 @@ function App() {
                         await api(`orders/${detail.order.id}/resolve`, {
                           resolution: "record_receipt",
                           receipt: reviewText,
+                          messageId: reviewMessageId
+                            ? Number(reviewMessageId)
+                            : undefined,
                         });
                         setDetail(null);
                       })

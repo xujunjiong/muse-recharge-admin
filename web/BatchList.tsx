@@ -37,15 +37,31 @@ export function BatchList({
               <div className="batch-description">
                 {b.counts.needs_review > 0 && (
                   <strong>
-                    待核查 {b.counts.needs_review} 笔，请先人工处理
+                    待核查 {b.counts.needs_review} 笔
+                    {b.counts.isolated_review
+                      ? `（已隔离 ${b.counts.isolated_review} 笔）`
+                      : "，请先人工处理"}
                   </strong>
                 )}
                 {b.counts.partial > 0 && (
                   <strong>部分交付 {b.counts.partial} 笔，请核对</strong>
                 )}
                 <span>
-                  {b.paused ? b.reason || "已暂停" : "正在队列中执行"} · 待执行{" "}
-                  {b.counts.queued} 笔
+                  {b.paused
+                    ? b.reason || "已暂停"
+                    : b.counts.queued > 0 ||
+                        b.counts.preparing +
+                          b.counts.processing +
+                          b.counts.payment_submitting >
+                          0
+                      ? "正在队列中执行"
+                      : "已无待执行订单"}
+                  {" · 共 "}
+                  {b.counts.total} 笔 · 待执行 {b.counts.queued} 笔 · 执行中{" "}
+                  {b.counts.preparing +
+                    b.counts.processing +
+                    b.counts.payment_submitting}{" "}
+                  笔
                 </span>
                 <ResultCounts batch={b} />
               </div>

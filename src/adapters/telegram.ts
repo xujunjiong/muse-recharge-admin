@@ -1,3 +1,7 @@
+import {
+  ExecutionError,
+  isTransientNetworkError,
+} from "../execution-errors.js";
 import { readFileSync } from "node:fs";
 import { parseConfirmation, parseReceipt, parseIdr } from "../receipts.js";
 import type { BotAdapter, InputOrder, Quote, Receipt } from "../types.js";
@@ -33,6 +37,8 @@ export function quotaButtonPattern(qty: number) {
 export class TelegramAdapter implements BotAdapter {
   mode = "telegram" as const;
   submitted = new Set<string>();
+  onReceipt?: (receipt: Receipt) => boolean;
+  receiptOwner?: (messageId: number) => string | undefined;
   constructor(
     public transport: Transport,
     // 付款后等回执的超时：机器人交付是 30 次尝试逐次灌满，
@@ -71,7 +77,7 @@ export class TelegramAdapter implements BotAdapter {
     }
     const transport: Transport = {
       read: async () => {
-        const msgs = await client.getMessages(bot, { limit: 18 });
+        const msgs = await client.getMessages(bot, { limit: 100 });
         const out: Snapshot[] = [];
         for (const m of msgs) {
           if (m.out || !m.message) continue;
@@ -97,6 +103,17 @@ export class TelegramAdapter implements BotAdapter {
     };
     return new TelegramAdapter(transport);
   }
+  private async read() {
+    const snapshots = await this.transport.read();
+    for (const m of snapshots) {
+      const receipt = parseReceipt(m.text);
+      if (receipt) this.onReceipt?.({ ...receipt, messageId: m.id });
+    }
+    return snapshots;
+  }
+  async pollReceipts() {
+    await this.read();
+  }
   async wait(
     predicate: (m: Snapshot) => boolean,
     before: Snapshot[],
@@ -106,7 +123,7 @@ export class TelegramAdapter implements BotAdapter {
     const old = new Map(before.map((m) => [m.id, m.text]));
     const until = Date.now() + timeout;
     while (Date.now() < until) {
-      const messages = await this.transport.read();
+      const messages = await this.read();
       const maxId = Math.max(0, ...before.map((x) => x.id));
       const found = messages.filter(
         (m) =>
@@ -115,6 +132,20 @@ export class TelegramAdapter implements BotAdapter {
           predicate(m),
       );
       if (found.length) return found.at(-1)!;
+      for (const m of messages) {
+        if (
+          (m.id <= maxId && m.id !== editedMessageId) ||
+          old.get(m.id) === m.text
+        )
+          continue;
+        if (/INSUFFICIENT BALANCE/i.test(m.text))
+          throw new ExecutionError("systemic", "钱包余额不足");
+        if (/INVALID CODE|EXPIRED CODE/i.test(m.text))
+          throw new ExecutionError(
+            "local",
+            "机器人明确拒绝邀请码：无效或过期，未付款",
+          );
+      }
       await new Promise((r) => setTimeout(r, this.poll));
     }
     throw Error("等待机器人回复超时；不会自动再次付款");
@@ -124,7 +155,7 @@ export class TelegramAdapter implements BotAdapter {
     predicate: (m: Snapshot) => boolean,
     editedMessageId?: number,
   ) {
-    const before = await this.transport.read();
+    const before = await this.read();
     await fn();
     return this.wait(
       predicate,
@@ -165,7 +196,7 @@ export class TelegramAdapter implements BotAdapter {
   async balance() {
     let m = await this.entry();
     if (!/Welcome to Satu Digital/i.test(m.text)) {
-      const all = await this.transport.read();
+      const all = await this.read();
       const menu = [...all]
         .reverse()
         .find((m) => m.buttons.some((b) => /Main Menu/.test(b.text)));
@@ -183,10 +214,7 @@ export class TelegramAdapter implements BotAdapter {
   async prepare(order: InputOrder): Promise<Quote> {
     // 记录本单开始时的最大消息 id：机器人有时回执来得极快
     // （早于付款提交），result() 必须能看到这段时间内的回执。
-    const startMaxId = Math.max(
-      0,
-      ...(await this.transport.read()).map((x) => x.id),
-    );
+    const startMaxId = Math.max(0, ...(await this.read()).map((x) => x.id));
     let m = await this.entry();
     if (/Welcome to Satu Digital/i.test(m.text))
       m = await this.action(
@@ -228,17 +256,14 @@ export class TelegramAdapter implements BotAdapter {
       m.id,
     );
     const q = parseConfirmation(m.text);
-    if (
-      !q ||
-      q.code !== order.code ||
-      q.quantity !== order.quantity ||
-      q.cost > order.maxCost
-    )
-      throw Error("确认页的邀请码、数量或金额不匹配");
+    if (!q || q.code !== order.code || q.quantity !== order.quantity)
+      throw new ExecutionError("systemic", "确认页的邀请码、数量或金额不匹配");
+    if (q.cost > order.maxCost)
+      throw new ExecutionError("local", "确认页报价超出费用上限，未付款");
     const balance = m.text.match(/Main Balance:\s*IDR\s*([\d.,]+)/);
     if (!balance) throw Error("确认页缺少钱包余额，禁止付款");
     if (parseIdr(balance[1]) < q.cost) throw Error("钱包余额不足");
-    const all = await this.transport.read();
+    const all = await this.read();
     return {
       ...q,
       raw: m.text,
@@ -253,7 +278,7 @@ export class TelegramAdapter implements BotAdapter {
   async submit(q: Quote, canSubmit?: () => boolean) {
     if (!q.ref || this.submitted.has(q.ref)) throw Error("拒绝重复提交付款");
     const r: Ref = JSON.parse(q.ref);
-    const m = (await this.transport.read()).find((m) => m.id === r.id);
+    const m = (await this.read()).find((m) => m.id === r.id);
     if (!m || m.text !== r.text) throw Error("确认页已变化，禁止付款");
     const current = parseConfirmation(m.text);
     if (
@@ -278,10 +303,11 @@ export class TelegramAdapter implements BotAdapter {
     while (Date.now() < until) {
       let messages: Snapshot[];
       try {
-        messages = (await this.transport.read()).filter(
+        messages = (await this.read()).filter(
           (m) => m.id > sinceId || (m.id === r.id && m.text !== r.text),
         );
       } catch (e) {
+        if (!isTransientNetworkError(e)) throw e;
         // 付款已提交，等回执期间的瞬时网络抖动不能直接判失败：
         // 继续等到超时，超时才转人工核查。
         readFailures++;
@@ -293,11 +319,37 @@ export class TelegramAdapter implements BotAdapter {
       readFailures = 0;
       for (const m of messages.reverse()) {
         const receipt = parseReceipt(m.text);
-        if (receipt) return receipt;
+        if (receipt) {
+          const observed = { ...receipt, messageId: m.id };
+          const handled = this.onReceipt?.(observed);
+          const owner = this.receiptOwner?.(m.id);
+          if (owner && q.orderId && owner !== q.orderId) continue;
+          if (receipt.code === q.code && (!this.onReceipt || handled))
+            return observed;
+          if (receipt.code !== q.code && handled) continue;
+          throw new ExecutionError(
+            "systemic",
+            "机器人回执无法确认归属，暂停整个队列",
+          );
+        }
+        // Non-receipt notices must be newer than the payment quote, or edit that quote.
+        if (!isFreshResult(m, r)) continue;
+        const noticeCode = m.text
+          .match(/Invite Code:\s*([A-Z0-9]{6})(?![A-Z0-9])/i)?.[1]
+          .toUpperCase();
+        if (noticeCode && noticeCode !== q.code) continue;
+        if (/INSUFFICIENT BALANCE/i.test(m.text))
+          throw new ExecutionError(
+            "systemic",
+            "钱包余额不足，需核查本单是否扣款",
+          );
         if (
           /FAILED|INSUFFICIENT BALANCE|INVALID CODE|EXPIRED CODE/i.test(m.text)
         )
-          throw Error("机器人报告异常，需核对是否扣款或退款");
+          throw new ExecutionError(
+            "uncertain",
+            "机器人报告异常，需核对是否扣款或退款",
+          );
         // 机器人明确说系统维护、交付延迟：不会再有回执，直接转人工核查，
         // 不必空等到超时。钱是否已扣、币是否会补发，都以 Telegram 为准。
         if (
@@ -305,13 +357,17 @@ export class TelegramAdapter implements BotAdapter {
             m.text,
           )
         )
-          throw Error(
+          throw new ExecutionError(
+            "uncertain",
             "机器人系统维护中，交付延迟；请稍后在 Telegram 核对是否扣款/到账",
           );
       }
       await new Promise((resolve) => setTimeout(resolve, this.poll));
     }
-    throw Error("付款后未收到最终回执，请核查，禁止自动重试");
+    throw new ExecutionError(
+      "uncertain",
+      "付款后未收到最终回执，请核查，禁止自动重试",
+    );
   }
   async close() {
     await this.transport.close();

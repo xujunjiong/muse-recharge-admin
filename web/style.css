@@ -1269,3 +1269,13 @@ pre {
     margin-left: 0;
   }
 }
+
+.queue-stop {
+  align-items: center;
+}
+.queue-stop p {
+  margin: 6px 0;
+}
+.queue-stop button {
+  flex-shrink: 0;
+}

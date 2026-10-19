@@ -662,3 +662,132 @@ test("state keeps unfinished statuses visible and archives after review resoluti
     await f.close();
   }
 });
+
+test("queue stop is visible in state and resume requires authentication, CSRF and cleared blockers", async () => {
+  const f = await fixture();
+  try {
+    f.store.haltQueue("连续3单异常，已暂停");
+    const { cookie, csrf } = await login(f.base);
+    const headers = { cookie, Origin: f.base, "x-csrf-token": csrf };
+    assert.equal(
+      (
+        await fetch(f.base + "/api/queue/resume", {
+          method: "POST",
+          headers: { Origin: f.base },
+          body: "{}",
+        })
+      ).status,
+      401,
+    );
+    assert.equal(
+      (
+        await fetch(f.base + "/api/queue/resume", {
+          method: "POST",
+          headers: { cookie, Origin: f.base },
+          body: "{}",
+        })
+      ).status,
+      403,
+    );
+    const state = await (
+      await fetch(f.base + "/api/state", { headers: { cookie } })
+    ).json();
+    assert.equal(state.queueControl.stopped, true);
+    assert.match(state.queueControl.reason, /连续3单异常/);
+    const b = f.store.createBatch(
+      "blocker",
+      [{ code: "AB12CD", quantity: 1, maxCost: 1700 }],
+      1700,
+    );
+    const o = f.store.orders().find((o) => o.batchId === b.id)!;
+    f.store.setStatus(o.id, "needs_review", "legacy or unmatched receipt");
+    const resume = () =>
+      fetch(f.base + "/api/queue/resume", {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+    assert.equal((await resume()).status, 400);
+    f.store.resolve(o.id, "not_charged");
+    assert.equal((await resume()).status, 200);
+    assert.equal(f.store.queueControl().stopped, false);
+    assert.equal(f.store.settings("queueStreak"), 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("manual receipt selection persists ambiguous-message ownership before queue resume", async () => {
+  const f = await fixture();
+  try {
+    const { cookie, csrf } = await login(f.base);
+    const headers = {
+      cookie,
+      Origin: f.base,
+      "x-csrf-token": csrf,
+      "Content-Type": "application/json",
+    };
+    const text =
+      "TOKEN DELIVERED SUCCESSFULLY!\nTokens Credited: +1 Billion Tokens (1B)\nInvite Code: AB12CD\nCharged from Main Balance: Rp 1700\nMain Balance Remaining (Universal): IDR 10000";
+    const quote = {
+      code: "AB12CD",
+      quantity: 1,
+      cost: 1700,
+      ref: JSON.stringify({ id: 11, startMaxId: 10, maxId: 11 }),
+    };
+    f.store.createBatch(
+      "first",
+      [{ code: "AB12CD", quantity: 1, maxCost: 1700 }],
+      1700,
+    );
+    const first = f.store.claim()!;
+    f.store.beginPayment(first.id, quote);
+    const receipt = {
+      code: "AB12CD",
+      quantity: 1,
+      cost: 1700,
+      balance: 10000,
+      raw: text,
+    };
+    f.store.setStatus(first.id, "succeeded", "first", { receipt });
+    f.store.createBatch(
+      "repeat",
+      [{ code: "AB12CD", quantity: 1, maxCost: 1700 }],
+      1700,
+      true,
+    );
+    const second = f.store.claim()!;
+    f.store.beginPayment(second.id, quote);
+    f.store.setStatus(second.id, "needs_review", "timeout");
+    f.store.isolateReview(second.id);
+    f.store.observeReceipt({ ...receipt, messageId: 22 });
+    const detail = await (
+      await fetch(f.base + `/api/orders/${second.id}`, { headers: { cookie } })
+    ).json();
+    assert.equal(detail.pendingReceipts[0].messageId, 22);
+    const settle = (messageId: number) =>
+      fetch(f.base + `/api/orders/${second.id}/resolve`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          resolution: "record_receipt",
+          receipt: text,
+          messageId,
+        }),
+      });
+    assert.equal((await settle(999)).status, 400);
+    assert.equal((await settle(22)).status, 200);
+    assert.equal(f.store.settings("receiptMessage:22").orderId, second.id);
+    assert.equal(f.store.pendingReceipts("AB12CD").length, 0);
+    const resume = await fetch(f.base + "/api/queue/resume", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(resume.status, 200);
+    assert.equal(f.store.observeReceipt({ ...receipt, messageId: 22 }), true);
+    assert.equal(f.store.queueControl().stopped, false);
+  } finally {
+    await f.close();
+  }
+});

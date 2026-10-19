@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs";
 import { TelegramAdapter } from "./telegram.js";
 import { readSavedLogin } from "../telegram-login.js";
-import type { BotAdapter, InputOrder, Quote } from "../types.js";
+import type { BotAdapter, InputOrder, Quote, Receipt } from "../types.js";
 /** Allows the admin page to boot before the first Telegram login. */
 export class ManagedTelegram implements BotAdapter {
   mode = "telegram" as const;
   ready = false;
+  onReceipt?: (receipt: Receipt) => boolean;
+  receiptOwner?: (messageId: number) => string | undefined;
   private current: TelegramAdapter | null = null;
   constructor(
     private config: {
@@ -27,6 +29,8 @@ export class ManagedTelegram implements BotAdapter {
         ? { apiId: saved.apiId, apiHash: saved.apiHash, session: saved.session }
         : {}),
     });
+    this.current.onReceipt = (receipt) => this.onReceipt?.(receipt) ?? false;
+    this.current.receiptOwner = (id) => this.receiptOwner?.(id);
     this.ready = true;
   }
   private get() {
@@ -46,6 +50,9 @@ export class ManagedTelegram implements BotAdapter {
   }
   async result(q: Quote) {
     return this.get().result(q);
+  }
+  async pollReceipts() {
+    await this.get().pollReceipts();
   }
   async close() {
     this.ready = false;

@@ -225,6 +225,7 @@ export function createApp(config: {
             wallet: store.settings("wallet"),
             orders: store.orders(),
             batches: store.batches(),
+            queueControl: store.queueControl(),
             connected:
               adapter.mode === "mock"
                 ? "模拟模式"
@@ -248,18 +249,8 @@ export function createApp(config: {
               ["code", "password"].includes(loginStatus.phase))
           )
             throw Error("请先完成或取消 Telegram 登录");
-          if (
-            worker.busy ||
-            botBusy ||
-            store
-              .orders()
-              .some((o) =>
-                ["payment_submitting", "processing", "needs_review"].includes(
-                  o.status,
-                ),
-              )
-          )
-            throw Error("有执行中或未决订单，暂不操作机器人菜单");
+          if (worker.busy || botBusy || store.hasBlockingOrders())
+            throw Error("有执行中或未隔离的未决订单，暂不操作机器人菜单");
           botBusy = true;
           worker.maintenance = true;
           try {
@@ -388,6 +379,20 @@ export function createApp(config: {
           json(200, b);
           return;
         }
+        if (path === "/api/queue/resume" && post) {
+          const flow = config.telegramLogin?.status();
+          if (
+            !runtimeReady() ||
+            worker.busy ||
+            botBusy ||
+            flow?.busy ||
+            (flow && ["code", "password"].includes(flow.phase))
+          )
+            throw Error("请先完成 Telegram 连接并等待当前任务结束");
+          store.resumeQueue();
+          json(200, { ok: true });
+          return;
+        }
         const action = path.match(
           /^\/api\/batches\/([a-zA-Z0-9-]+)\/(pause|resume)$/,
         );
@@ -407,12 +412,17 @@ export function createApp(config: {
         if (review && post) {
           if (worker.busy) throw Error("当前仍有任务处理中");
           const data = JSON.parse((await body(req, 32 * 1024)).toString());
+          if (
+            data.messageId !== undefined &&
+            (!Number.isSafeInteger(data.messageId) || data.messageId <= 0)
+          )
+            throw Error("回执选择无效");
           if (data.resolution === "not_charged")
-            store.resolve(review[1], "not_charged");
+            store.resolve(review[1], "not_charged", undefined, data.messageId);
           else if (data.resolution === "record_receipt") {
             const receipt = parseReceipt(String(data.receipt || ""));
             if (!receipt) throw Error("不是可识别的机器人最终成功回执");
-            store.resolve(review[1], "record_receipt", receipt);
+            store.resolve(review[1], "record_receipt", receipt, data.messageId);
           } else throw Error("核查方式无效");
           json(200, { ok: true });
           return;
@@ -424,7 +434,11 @@ export function createApp(config: {
             json(404, { error: "订单不存在" });
             return;
           }
-          json(200, { order: o, events: store.events(o.id) });
+          json(200, {
+            order: o,
+            events: store.events(o.id),
+            pendingReceipts: store.pendingReceipts(o.code),
+          });
           return;
         }
         if (path === "/api/export" && !post) {
