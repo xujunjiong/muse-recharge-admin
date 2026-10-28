@@ -227,6 +227,10 @@ function App() {
               e.preventDefault();
               void action(async () => {
                 const r = await api("login", { password });
+                if (r.role === "single") {
+                  window.location.href = "/single.html";
+                  return;
+                }
                 setCsrf(r.csrf);
                 setLogged(true);
                 setPassword("");

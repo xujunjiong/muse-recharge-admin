@@ -24,6 +24,9 @@ export type Order = InputOrder & {
   updatedAt: string;
   quote?: Quote;
   receipt?: Receipt;
+  priority?: number;
+  source?: string;
+  account?: string;
 };
 export type Quote = {
   orderId?: string;

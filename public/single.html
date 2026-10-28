@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>单充 · Muse</title>
+<link rel="stylesheet" href="/single.css" />
+</head>
+<body>
+<main class="shell">
+  <section id="login-view" class="card" hidden>
+    <h1>单充</h1>
+    <p class="muted">单个邀请码充值，固定 30B</p>
+    <form id="login-form">
+      <label>单充密码<input id="password" type="password" autocomplete="current-password" required /></label>
+      <div id="login-error" class="alert error" hidden></div>
+      <button class="primary" type="submit">登录</button>
+    </form>
+  </section>
+  <section id="app-view" class="card" hidden>
+    <div class="row"><h1>单充</h1><button id="logout">退出</button></div>
+    <p class="muted">单个邀请码充值，固定 30B，优先排队</p>
+    <form id="order-form" class="row">
+      <input id="code" maxlength="6" placeholder="邀请码（6 位）" required />
+      <button class="primary" type="submit">提交充值</button>
+    </form>
+    <div id="order-error" class="alert error" hidden></div>
+    <div id="order-ok" class="alert success" hidden></div>
+    <h2>我的单子</h2>
+    <ul id="orders"></ul>
+  </section>
+</main>
+<script src="/single.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { ExecutionError } from "./execution-errors.js";
 import { receiptMatches } from "./receipt-matching.js";
+import { PACKAGE_PRICES } from "./pricing.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
@@ -24,11 +25,11 @@ export class Store {
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
  CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, requestKey TEXT UNIQUE, payload TEXT, budget INTEGER, paused INTEGER DEFAULT 0, reason TEXT DEFAULT '', createdAt TEXT);
- CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,batchId TEXT REFERENCES batches(id),code TEXT,quantity INTEGER,maxCost INTEGER,note TEXT,status TEXT,actualQuantity REAL,actualCost INTEGER,message TEXT DEFAULT '',quote TEXT,receipt TEXT,createdAt TEXT,updatedAt TEXT,UNIQUE(batchId,code));
+ CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,batchId TEXT REFERENCES batches(id),code TEXT,quantity INTEGER,maxCost INTEGER,note TEXT,status TEXT,actualQuantity REAL,actualCost INTEGER,message TEXT DEFAULT '',quote TEXT,receipt TEXT,createdAt TEXT,updatedAt TEXT,priority INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'batch',account TEXT NOT NULL DEFAULT 'main',UNIQUE(batchId,code));
  CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,orderId TEXT,status TEXT,message TEXT,createdAt TEXT);
  CREATE TABLE IF NOT EXISTS imports(id TEXT PRIMARY KEY,rows TEXT,createdAt TEXT);
  CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
- CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,csrf TEXT,expires INTEGER);
+ CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,csrf TEXT,expires INTEGER,role TEXT NOT NULL DEFAULT 'admin');
  CREATE TABLE IF NOT EXISTS worker_lock(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT,expires INTEGER,pid INTEGER);`);
     if (
       !(this.db.prepare("PRAGMA table_info(worker_lock)").all() as any[]).some(
@@ -36,6 +37,29 @@ export class Store {
       )
     )
       this.db.exec("ALTER TABLE worker_lock ADD COLUMN pid INTEGER");
+    const orderCols = (
+      this.db.prepare("PRAGMA table_info(orders)").all() as any[]
+    ).map((c) => c.name);
+    if (!orderCols.includes("priority"))
+      this.db.exec(
+        "ALTER TABLE orders ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+      );
+    if (!orderCols.includes("source"))
+      this.db.exec(
+        "ALTER TABLE orders ADD COLUMN source TEXT NOT NULL DEFAULT 'batch'",
+      );
+    if (!orderCols.includes("account"))
+      this.db.exec(
+        "ALTER TABLE orders ADD COLUMN account TEXT NOT NULL DEFAULT 'main'",
+      );
+    if (
+      !(this.db.prepare("PRAGMA table_info(sessions)").all() as any[]).some(
+        (c) => c.name === "role",
+      )
+    )
+      this.db.exec(
+        "ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'",
+      );
   }
   transaction<T>(f: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -189,6 +213,7 @@ export class Store {
     rows: InputOrder[],
     budget: number,
     allowRepeat = false,
+    opts: { priority?: number; source?: string; account?: string } = {},
   ): any {
     if (
       typeof key !== "string" ||
@@ -261,7 +286,7 @@ export class Store {
         const oid = randomUUID();
         this.db
           .prepare(
-            "INSERT INTO orders(id,batchId,code,quantity,maxCost,note,status,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO orders(id,batchId,code,quantity,maxCost,note,status,createdAt,updatedAt,priority,source,account) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
           )
           .run(
             oid,
@@ -273,6 +298,9 @@ export class Store {
             "queued",
             now,
             now,
+            opts.priority ?? 0,
+            opts.source ?? "batch",
+            opts.account ?? "main",
           );
         this.db
           .prepare(
@@ -282,6 +310,33 @@ export class Store {
       }
       return { id, budget, paused: 0, createdAt: now };
     });
+  }
+  createSingleOrder(code: string) {
+    const clean = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(clean))
+      throw Error("邀请码格式无效，应为 6 位字母数字");
+    const cap = PACKAGE_PRICES[30];
+    const batch = this.createBatch(
+      randomUUID(),
+      [{ code: clean, quantity: 30, maxCost: cap, note: "单充" }],
+      cap,
+      false,
+      { priority: 1, source: "single", account: "main" },
+    );
+    const order = this.db
+      .prepare("SELECT id FROM orders WHERE batchId=?")
+      .get(batch.id) as any;
+    return { orderId: order.id, code: clean };
+  }
+  singleOrders(): Order[] {
+    return this.db
+      .prepare("SELECT * FROM orders WHERE source='single' ORDER BY rowid DESC")
+      .all()
+      .map((r: any) => ({
+        ...r,
+        quote: r.quote ? JSON.parse(r.quote) : undefined,
+        receipt: r.receipt ? JSON.parse(r.receipt) : undefined,
+      })) as Order[];
   }
   setStatus(
     id: string,
@@ -497,7 +552,7 @@ export class Store {
       if (this.queueControl().stopped || this.hasBlockingOrders()) return null;
       const r = this.db
         .prepare(
-          "SELECT o.id FROM orders o JOIN batches b ON o.batchId=b.id WHERE o.status='queued' AND b.paused=0 ORDER BY o.rowid LIMIT 1",
+          "SELECT o.id FROM orders o JOIN batches b ON o.batchId=b.id WHERE o.status='queued' AND b.paused=0 ORDER BY o.priority DESC, o.rowid ASC LIMIT 1",
         )
         .get() as any;
       if (!r) return null;

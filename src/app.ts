@@ -55,6 +55,7 @@ export function createApp(config: {
   worker: Worker;
   adapter: BotAdapter;
   passwordHash: string;
+  singlePasswordHash?: string;
   publicDir?: string;
   origin?: string;
   secureCookie?: boolean;
@@ -127,11 +128,16 @@ export function createApp(config: {
         reserved.count++;
         limits.set(ip, reserved);
         const data = JSON.parse((await body(req, 4096)).toString());
-        if (
-          typeof data.password !== "string" ||
-          data.password.length > 256 ||
-          !verify(data.password, config.passwordHash)
-        ) {
+        let role: string | null = null;
+        if (typeof data.password === "string" && data.password.length <= 256) {
+          if (verify(data.password, config.passwordHash)) role = "admin";
+          else if (
+            config.singlePasswordHash &&
+            verify(data.password, config.singlePasswordHash)
+          )
+            role = "single";
+        }
+        if (!role) {
           json(401, { error: "密码不正确" });
           return;
         }
@@ -141,13 +147,13 @@ export function createApp(config: {
           .prepare("DELETE FROM sessions WHERE expires<?")
           .run(Date.now());
         store.db
-          .prepare("INSERT INTO sessions VALUES(?,?,?)")
-          .run(tokenHash(token), csrf, Date.now() + 8 * 3600000);
+          .prepare("INSERT INTO sessions(hash,csrf,expires,role) VALUES(?,?,?,?)")
+          .run(tokenHash(token), csrf, Date.now() + 8 * 3600000, role);
         res.setHeader(
           "Set-Cookie",
           `muse_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${config.secureCookie ? "; Secure" : ""}`,
         );
-        json(200, { csrf });
+        json(200, { csrf, role });
         return;
       }
       if (path.startsWith("/api/")) {
@@ -157,6 +163,35 @@ export function createApp(config: {
         }
         if (post && req.headers["x-csrf-token"] !== session.csrf) {
           json(403, { error: "安全令牌不匹配，请刷新页面" });
+          return;
+        }
+        if (
+          path.startsWith("/api/single/") &&
+          session.role !== "single"
+        ) {
+          json(403, { error: "单充接口只接受单页会话" });
+          return;
+        }
+        if (
+          session.role === "single" &&
+          !(
+            path.startsWith("/api/single/") ||
+            path === "/api/session" ||
+            path === "/api/logout"
+          )
+        ) {
+          json(403, { error: "单充账号无权访问该接口" });
+          return;
+        }
+        if (path === "/api/single/orders" && !post) {
+          json(200, { orders: store.singleOrders() });
+          return;
+        }
+        if (path === "/api/single/order" && post) {
+          if (!runtimeReady())
+            throw Error("请先在管理页完成 Telegram 连接并刷新余额");
+          const d = JSON.parse((await body(req, 4096)).toString());
+          json(200, store.createSingleOrder(String(d.code || "")));
           return;
         }
         if (path.startsWith("/api/telegram/")) {
@@ -204,7 +239,7 @@ export function createApp(config: {
           return;
         }
         if (path === "/api/session" && !post) {
-          json(200, { csrf: session.csrf });
+          json(200, { csrf: session.csrf, role: session.role || "admin" });
           return;
         }
         if (path === "/api/logout" && post) {
@@ -484,6 +519,9 @@ export function createApp(config: {
         "/": ["index.html", "text/html; charset=utf-8"],
         "/app.js": ["app.js", "text/javascript"],
         "/app.css": ["app.css", "text/css"],
+        "/single.html": ["single.html", "text/html; charset=utf-8"],
+        "/single.js": ["single.js", "text/javascript"],
+        "/single.css": ["single.css", "text/css"],
       };
       if (req.method !== "GET" || !files[path]) {
         json(404, { error: "页面不存在" });

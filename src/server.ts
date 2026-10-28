@@ -105,6 +105,7 @@ const app = createApp({
   worker,
   adapter,
   passwordHash: process.env.ADMIN_PASSWORD_HASH,
+  singlePasswordHash: process.env.SINGLE_PASSWORD_HASH,
   telegramLogin,
   origin: process.env.APP_ORIGIN,
   secureCookie: process.env.COOKIE_SECURE === "true",
